@@ -1,0 +1,6 @@
+# Campaign rules: injected into every LLM prompt as HARD constraints.
+# Lines starting with # are ignored. Delete everything below to run without rules.
+
+DON'T pick moments that discuss politics or elections.
+DON'T pick moments containing graphic violence or self-harm.
+DO prefer moments with a concrete, actionable takeaway.

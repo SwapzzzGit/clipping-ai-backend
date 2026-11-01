@@ -1,0 +1,58 @@
+# clipper configuration. CLI flags override these values.
+
+work_dir: work            # per-video cache: work/<video_id>/
+output_dir: output        # finished clips: output/<video_id>/
+language: en              # subtitle language to look for
+num_clips: 5
+
+ffmpeg_path: null         # null = use ffmpeg on PATH (or imageio-ffmpeg if installed)
+
+llm:
+  # Overridden by env vars LLM_PROVIDER / LLM_MODEL / LLM_API_KEY.
+  provider: gemini        # gemini | anthropic | openai | mock
+  model: null             # null = provider default (gemini-flash-lite-latest, claude-haiku-5-5, gpt-5-mini)
+  base_url: null          # for openai-compatible servers (Ollama, LM Studio, ...)
+  temperature: 0.2
+  max_tokens: 8192        # includes Gemini "thinking" tokens
+  concurrency: 4          # parallel pass-1 requests
+  timeout_sec: 120
+
+windows:
+  length_sec: 75          # pass-1 window size (60-90 s)
+  stride_sec: 30
+  batch_size: 6           # windows per LLM call
+
+scoring:
+  weights:
+    hook_strength: 0.30
+    emotion: 0.15
+    suspense_or_curiosity: 0.20
+    controversy_or_surprise: 0.15
+    standalone_clarity: 0.20
+  heatmap_bonus: 1.0      # added to final_score (0-10 scale) at full "Most Replayed" intensity
+  heatmap_threshold: 0.5  # heatmap value (0-1) below which no bonus is given
+  top_k: 15               # windows sent to pass 2
+
+clips:
+  min_sec: 20
+  max_sec: 60
+  snap_tolerance_sec: 4   # how far a start/end may move to land on a sentence boundary
+
+download:
+  max_height: 1080
+  padding_sec: 0.5
+  parallel: 3
+  retries: 2
+
+render:
+  width: 1080
+  height: 1920
+  crf: 20
+  preset: veryfast
+  face_sample_fps: 3      # frames per second analysed for face tracking
+  shot_change_threshold: 0.5  # histogram distance that counts as a camera cut
+  captions: true
+  caption_words_per_line: 3
+  caption_font: Arial
+  caption_font_size: 84
+  caption_highlight: "&H0000E5FF"   # ASS BGR colour of the word being spoken (yellow)

@@ -1,0 +1,12 @@
+.git
+.venv
+.env
+**/__pycache__
+.pytest_cache
+backend/data
+work
+output
+frontend
+board
+.claude
+.worktrees

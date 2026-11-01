@@ -257,7 +257,8 @@ def test_unified_login_url_uses_config_id_not_scope():
     c = unified(lambda r: httpx.Response(500))
     u = urllib.parse.urlparse(c.auth_url("st"))
     q = urllib.parse.parse_qs(u.query)
-    assert u.netloc == "www.facebook.com" and u.path.endswith("/dialog/oauth")
+    assert u.netloc == "www.facebook.com" and u.path == "/dialog/oauth"
+    assert q["display"] == ["popup"] and q["prompt"] == ["login"]
     assert q["config_id"] == ["CFG42"] and "scope" not in q
     assert q["response_type"] == ["code"] and q["override_default_response_type"] == ["true"]
 

@@ -85,9 +85,11 @@ class InstagramUnifiedConnector(Connector):
 
     def auth_url(self, state, code_challenge=None, login_hint=None):
         self.require_configured()
-        q = {"client_id": self.client_id, "config_id": self.config_id, "redirect_uri": self.redirect_uri(),
-             "response_type": "code", "override_default_response_type": "true", "state": state}
-        return f"{DIALOG}/{self.version}/dialog/oauth?{urllib.parse.urlencode(q)}"
+        # Same shape as the "Login URL" Meta's dashboard generates for a Unified-login configuration.
+        q = {"client_id": self.client_id, "config_id": self.config_id, "display": "popup",
+             "override_default_response_type": "true", "redirect_uri": self.redirect_uri(),
+             "response_type": "code", "state": state, "prompt": "login"}
+        return f"{DIALOG}/dialog/oauth?{urllib.parse.urlencode(q)}"
 
     def exchange_code(self, code, code_verifier=None):
         self.require_configured()

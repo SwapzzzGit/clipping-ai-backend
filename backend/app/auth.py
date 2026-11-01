@@ -47,8 +47,14 @@ def _valid(token: str | None) -> bool:
     return hmac.compare_digest(sig, _sign(int(exp)).partition(".")[2])
 
 
+def _bearer_ok(request: Request) -> bool:
+    """Scripts (backend/push_clips.py) send `Authorization: Bearer <APP_PASSWORD>` instead of a cookie."""
+    header = request.headers.get("authorization", "")
+    return header.startswith("Bearer ") and hmac.compare_digest(header[7:].encode(), _password().encode())
+
+
 def authenticated(request: Request) -> bool:
-    return not _password() or _valid(request.cookies.get(COOKIE))
+    return not _password() or _valid(request.cookies.get(COOKIE)) or _bearer_ok(request)
 
 
 class LoginIn(BaseModel):
@@ -87,6 +93,6 @@ def install(app) -> None:
     async def require_login(request: Request, call_next):
         path = request.url.path
         if (_password() and request.method != "OPTIONS" and (path.startswith("/api/") or path.startswith("/media/"))
-                and not PUBLIC.match(path) and not _valid(request.cookies.get(COOKIE))):
+                and not PUBLIC.match(path) and not authenticated(request)):
             return JSONResponse({"detail": "Sign in required"}, status_code=401)
         return await call_next(request)

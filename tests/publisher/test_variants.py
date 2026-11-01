@@ -76,3 +76,15 @@ def test_prepare_video_trims_long_clip(tmp_path):
     probe = subprocess.run([ff, "-hide_banner", "-i", str(out)], capture_output=True, text=True).stderr
     assert "Duration: 00:00:01.9" in probe or "Duration: 00:00:02.0" in probe
     assert prepare_video(src, 1.5, Limits(max_duration_sec=60), tmp_path / "fit", ff) == src
+
+
+def test_preview_falls_back_to_templates_when_llm_unavailable(data_dir, clip_source):
+    from publisher.service import Publisher
+    from tests.publisher.conftest import connect_mock
+
+    def broken():
+        raise RuntimeError("No API key for gemini")
+    pub = Publisher(data_dir=data_dir, connectors={"mock": MockConnector()}, llm_factory=broken, ffmpeg="")
+    aid = connect_mock(pub.accounts, "x")["id"]
+    vs = pub.preview(str(clip_source), [aid], use_llm=True)
+    assert len(vs) == 2 and vs[0]["post"]["title"]

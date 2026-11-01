@@ -160,7 +160,12 @@ class Publisher:
 
     def preview(self, source: str, account_ids: list[str], clip_ids: list[int] | None = None,
                 use_llm: bool = False) -> list[dict]:
-        llm = self.llm_factory() if use_llm else None
+        llm = None
+        if use_llm:
+            try:
+                llm = self.llm_factory()
+            except Exception as e:   # no API key etc.: fall back to templated captions instead of failing
+                log.warning("LLM captions unavailable (%s); using templated captions", e)
         return build_variants(source, self._accounts_for(account_ids), self.connectors, clip_ids, llm)
 
     def create_job(self, source: str, targets: list[dict] | None = None, account_ids: list[str] | None = None,

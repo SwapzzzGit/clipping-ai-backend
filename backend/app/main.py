@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
-from app import REPO_ROOT, auth, catalog, claude_bridge, trims
+from app import REPO_ROOT, auth, catalog, claude_bridge, importer, trims
 from app.store import OUTPUT_DIR, WORK_DIR, JobStore, Settings
 from app.worker import Worker
 from publisher.api import build_router as build_publish_router, install_tunnel_guard
@@ -54,6 +54,7 @@ app.add_middleware(CORSMiddleware, allow_origins=_origins, allow_credentials=Tru
                    allow_methods=["*"], allow_headers=["*"])
 auth.install(app)        # APP_PASSWORD set = sign-in required (deployed); unset = open (local dev)
 app.include_router(auth.router)
+app.include_router(importer.build_router(store))   # clips rendered on a laptop, pushed by backend/push_clips.py
 
 
 @app.get("/api/health", include_in_schema=False)

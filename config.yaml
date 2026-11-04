@@ -38,6 +38,11 @@ clips:
   max_sec: 60
   snap_tolerance_sec: 4   # how far a start/end may move to land on a sentence boundary
 
+transcribe:              # speech-to-text for uploaded videos (they have no YouTube captions)
+  model: small           # tiny | base | small | medium | large-v3 (bigger = slower, more accurate)
+  device: cpu            # cpu | cuda (cuda needs the NVIDIA CUDA libraries)
+  compute_type: int8     # int8 is fastest on CPU
+
 download:
   max_height: 1080
   padding_sec: 0.5

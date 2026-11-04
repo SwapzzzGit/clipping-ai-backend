@@ -205,6 +205,8 @@ def score_windows(windows: list[dict], llm: LLM, cfg: dict, rules: str, cache_pa
 def boundaries(segments: list[dict]) -> dict[str, list[float]]:
     """Candidate clip start/end times, split into strong (punctuation) and weak (pause) ones."""
     words = _words(segments)
+    if not words:  # no speech: no sentence boundaries, so clip edges are left where they are
+        return {"strong_start": [], "strong_end": [], "weak_start": [], "weak_end": [], "word_start": [], "word_end": []}
     strong_s, strong_e, weak_s, weak_e = [words[0]["start"]], [], [words[0]["start"]], []
     for prev, cur in zip(words, words[1:]):
         if SENTENCE_END.search(prev["text"]) or cur.get("speaker_change"):

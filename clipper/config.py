@@ -37,6 +37,7 @@ DEFAULTS: dict[str, Any] = {
         "top_k": 15,
     },
     "clips": {"min_sec": 20, "max_sec": 60, "snap_tolerance_sec": 4},
+    "transcribe": {"model": "small", "device": "cpu", "compute_type": "int8"},
     "download": {"max_height": 1080, "padding_sec": 0.5, "parallel": 3, "retries": 2},
     "render": {
         "width": 1080,

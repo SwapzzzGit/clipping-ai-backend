@@ -13,17 +13,24 @@ import time
 from pathlib import Path
 
 from app import REPO_ROOT, claude_bridge
-from app.store import OUTPUT_DIR, WORK_DIR, JobStore, Settings, now
+from app.store import OUTPUT_DIR, UPLOADS_DIR, WORK_DIR, JobStore, Settings, now
+from clipper.action import find_action_picks
 from clipper.candidates import find_clips, normalize_external_picks
 from clipper.config import load_config
 from clipper.download import download_clips
 from clipper.llm import LLM
+from clipper.local import find_upload, get_local_transcript, is_upload, load_upload_info, upload_id_from_url
 from clipper.pipeline import llm_info, render_clips, write_outputs
 from clipper.transcript import get_transcript, load_or_fetch_info
 from clipper.util import ClipperError, find_ffmpeg, log as clipper_log, read_json
 
 POLL_SEC = 1.5
 PERIODIC_SEC = 10   # inbox scan and other housekeeping
+
+
+def speech_word_count(transcript: dict) -> int:
+    """Words the transcript actually has (word timings, or the words of each caption line)."""
+    return sum(len(s["words"]) or len(s["text"].split()) for s in transcript["segments"])
 
 
 class Cancelled(Exception):
@@ -113,15 +120,39 @@ class Worker:
             job = self.store.get(job_id)
             cfg = self.config_for(job)
             ffmpeg = find_ffmpeg(cfg.get("ffmpeg_path"), WORK_DIR)
-            self._progress(job_id, "transcript", message="Reading captions (no video download)")
-            info, work = load_or_fetch_info(job["url"], WORK_DIR)
-            transcript = get_transcript(info, work, cfg["language"])
+            local_src = None
+            if is_upload(job["url"]):
+                upload_id = upload_id_from_url(job["url"])
+                local_src = find_upload(UPLOADS_DIR, upload_id)
+                if not local_src:
+                    raise ClipperError("The uploaded video is missing. Upload it again.")
+                self._progress(job_id, "transcript", message="Transcribing the uploaded audio (no YouTube captions)")
+                info, work = load_upload_info(UPLOADS_DIR, WORK_DIR, upload_id)
+                transcript = get_local_transcript(info, work, local_src, cfg["language"], cfg.get("transcribe"),
+                                                  ffmpeg=ffmpeg)
+            else:
+                self._progress(job_id, "transcript", message="Reading captions (no video download)")
+                info, work = load_or_fetch_info(job["url"], WORK_DIR)
+                transcript = get_transcript(info, work, cfg["language"])
             self.store.update(job_id, video={
                 "id": info["id"], "title": info.get("title"), "channel": info.get("channel") or info.get("uploader"),
                 "duration": info.get("duration"), "thumbnail": info.get("thumbnail"),
                 "captions": transcript["source"], "heatmap": bool(transcript["heatmap"]),
             })
             self._check_cancel(job_id)
+
+            if local_src is not None and speech_word_count(transcript) < 3:
+                # Nothing to read (gaming footage, music): pick the moments from the picture and the sound.
+                cfg["render"]["captions"] = False
+                job = self.store.get(job_id)
+                if job["picks"] is None:
+                    self._progress(job_id, "selection", message="No speech here: picking the action from the picture and sound")
+                    picks = find_action_picks(local_src, cfg, ffmpeg, info.get("duration") or 0)
+                    clips = normalize_external_picks(picks, transcript, cfg)
+                    if not clips:
+                        raise ClipperError("No action moments were found in this video.")
+                    self.store.update(job_id, picks=clips, selection={"by": "action", "at": now()})
+                self._check_cancel(job_id)
 
             job = self.store.get(job_id)
             if job["picks"] is None:
@@ -138,7 +169,8 @@ class Worker:
             job = self.store.get(job_id)
             clips = job["picks"]
             self._progress(job_id, "download", 0, len(clips), "Downloading only the chosen ranges")
-            raws = download_clips(job["url"], clips, work, cfg, ffmpeg, info.get("duration") or 0)
+            raws = download_clips(job["url"], clips, work, cfg, ffmpeg, info.get("duration") or 0,
+                                  local_src=local_src)
             self._check_cancel(job_id)
 
             self._progress(job_id, "render", 0, len(clips), "Face tracking, captions, 9:16 encode")

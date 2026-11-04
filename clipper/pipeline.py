@@ -165,7 +165,7 @@ def build_manifest(info, transcript, clips, results, llm: dict, cfg, rules, url,
             "end": hms(c["end_sec"]),
             "duration_sec": r.get("duration_sec", round(c["end_sec"] - c["start_sec"], 3)),
             "source_t0": r.get("source_t0"),
-            "source_url": f"https://youtu.be/{vid}?t={int(c['start_sec'])}",
+            "source_url": "" if info.get("local") else f"https://youtu.be/{vid}?t={int(c['start_sec'])}",
             "transcript": c["text"],
             "reframe": {
                 "detector": a.get("detector"),

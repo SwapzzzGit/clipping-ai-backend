@@ -88,9 +88,18 @@ def download_clip(url: str, clip: dict, raw_dir: Path, cfg: dict, ffmpeg: str, d
     return {**result, "error": last_error}
 
 
-def download_clips(url: str, clips: list[dict], work: Path, cfg: dict, ffmpeg: str, duration: float) -> dict[int, dict]:
+def download_clips(url: str, clips: list[dict], work: Path, cfg: dict, ffmpeg: str, duration: float,
+                   local_src: Path | None = None) -> dict[int, dict]:
+    """Fetch every chosen range. For an uploaded file (`local_src`) the ranges are cut locally."""
     raw_dir = work / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
+    if local_src is not None:
+        from clipper.local import cut_upload_clip
+
+        with ThreadPoolExecutor(max_workers=max(1, cfg["download"]["parallel"])) as pool:
+            futures = {c["id"]: pool.submit(cut_upload_clip, local_src, c, raw_dir, cfg, ffmpeg, duration)
+                       for c in clips}
+            return {cid: f.result() for cid, f in futures.items()}
     with ThreadPoolExecutor(max_workers=max(1, cfg["download"]["parallel"])) as pool:
         futures = {c["id"]: pool.submit(download_clip, url, c, raw_dir, cfg, ffmpeg, duration) for c in clips}
         return {cid: f.result() for cid, f in futures.items()}

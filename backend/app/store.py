@@ -16,6 +16,7 @@ JOBS_DIR = DATA_DIR / "jobs"
 WORK_DIR = DATA_DIR / "work"
 OUTPUT_DIR = DATA_DIR / "output"
 TASKS_DIR = DATA_DIR / "claude_tasks"
+UPLOADS_DIR = DATA_DIR / "uploads"
 SETTINGS_PATH = DATA_DIR / "settings.json"
 
 STAGES = ["transcript", "selection", "download", "render", "done"]
@@ -30,7 +31,7 @@ class JobStore:
     def __init__(self):
         self._lock = threading.RLock()
         self._jobs: dict[str, dict] = {}
-        for d in (JOBS_DIR, WORK_DIR, OUTPUT_DIR, TASKS_DIR):
+        for d in (JOBS_DIR, WORK_DIR, OUTPUT_DIR, TASKS_DIR, UPLOADS_DIR):
             d.mkdir(parents=True, exist_ok=True)
         for f in JOBS_DIR.glob("*.json"):
             job = read_json(f)

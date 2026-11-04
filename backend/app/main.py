@@ -6,27 +6,30 @@ Run:  python backend/run.py   (serves the API on :8000 and, once built, the Reac
 from __future__ import annotations
 
 import os
+import re
 import secrets
 import shutil
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
 from app import REPO_ROOT, auth, catalog, claude_bridge, importer, trims
-from app.store import OUTPUT_DIR, WORK_DIR, JobStore, Settings
+from app.store import OUTPUT_DIR, UPLOADS_DIR, WORK_DIR, JobStore, Settings, now
 from app.worker import Worker
 from publisher.api import build_router as build_publish_router, install_tunnel_guard
 from publisher.service import Publisher
 from clipper.config import load_campaign_rules
 from clipper.llm import LLM
+from clipper.local import META_SUFFIX, UPLOAD_EXTENSIONS, find_upload, is_upload
 from clipper.transcript import video_id_from_url
-from clipper.util import ClipperError, find_ffmpeg, js_runtime, mmss, read_json
+from clipper.util import ClipperError, find_ffmpeg, js_runtime, mmss, read_json, write_json
 
 store = JobStore()
 settings = Settings()
@@ -77,8 +80,12 @@ class JobIn(BaseModel):
 
     @field_validator("url")
     @classmethod
-    def youtube_only(cls, v: str) -> str:
+    def youtube_or_upload(cls, v: str) -> str:
         v = v.strip()
+        if is_upload(v):
+            if not re.fullmatch(r"upload:[0-9a-f]{12}", v):
+                raise ValueError("That upload is not valid. Upload the video again.")
+            return v
         if not video_id_from_url(v):
             raise ValueError("Enter a YouTube video link (youtube.com/watch?v=…, youtu.be/…, or /shorts/…)")
         return v
@@ -172,8 +179,39 @@ def list_jobs():
     return [_summary(j) for j in store.list()]
 
 
+MAX_UPLOAD_BYTES = 20 * 1024**3
+UPLOAD_BLOCK = 8 * 1024 * 1024   # written in 8 MB blocks: fast even for multi-GB files
+
+
+@app.post("/api/uploads", status_code=201)
+async def upload_video(request: Request, name: str = Query(..., min_length=1, max_length=200)):
+    """Stream a video from this PC to disk. The body is the raw file (no multipart parsing)."""
+    ext = Path(name).suffix.lower()
+    if ext not in UPLOAD_EXTENSIONS:
+        raise HTTPException(422, "Use an MP4, MOV, M4V, MKV, WebM or AVI video.")
+    upload_id = uuid.uuid4().hex[:12]
+    dest = UPLOADS_DIR / f"{upload_id}{ext}"
+    written = 0
+    try:
+        with open(dest, "wb", buffering=UPLOAD_BLOCK) as f:
+            async for chunk in request.stream():
+                written += len(chunk)
+                if written > MAX_UPLOAD_BYTES:
+                    raise HTTPException(413, "That file is larger than 20 GB.")
+                f.write(chunk)
+        if written == 0:
+            raise HTTPException(422, "The upload was empty.")
+    except BaseException:
+        dest.unlink(missing_ok=True)
+        raise
+    write_json(UPLOADS_DIR / f"{upload_id}{META_SUFFIX}", {"name": name, "size": written, "uploaded_at": now()})
+    return {"id": upload_id, "name": name, "size": written, "url": f"upload:{upload_id}"}
+
+
 @app.post("/api/jobs", status_code=201)
 def create_job(body: JobIn):
+    if is_upload(body.url) and not find_upload(UPLOADS_DIR, body.url.removeprefix("upload:")):
+        raise HTTPException(422, "The uploaded video is missing. Upload it again.")
     if body.min_sec >= body.max_sec:
         raise HTTPException(422, "Minimum length must be shorter than maximum length")
     cat = categories.get(body.category_id) if body.category_id else None

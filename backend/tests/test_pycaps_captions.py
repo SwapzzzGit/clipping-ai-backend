@@ -1,6 +1,7 @@
 """Caption styles from pycaps: the words come from our transcript, the look from a pycaps template.
 A clip can be re-captioned in another style, and only that clip is re-rendered."""
 
+import os
 import shutil
 import subprocess
 
@@ -10,7 +11,8 @@ from fastapi.testclient import TestClient
 from app.main import app, store
 from clipper.captions import word_key
 from clipper.pycaps_captions import (DEFAULT_TEMPLATE, OURS, PREVIEW_DIR, caption_words, clip_caption_template,
-                                     is_valid, prepared_template, pycaps_document, style_options, template_names)
+                                     _replace_when_free, is_valid, prepared_template, pycaps_document, style_options,
+                                     template_names)
 from clipper.util import find_ffmpeg
 from pathlib import Path
 
@@ -52,6 +54,24 @@ def test_a_clip_uses_its_own_style_before_the_job_default():
     assert clip_caption_template({"caption_template": "minimalist"}, cfg) == "minimalist"
     assert clip_caption_template({}, cfg) == "vibrant"
     assert clip_caption_template({}, {"render": {}}) == DEFAULT_TEMPLATE
+
+
+def test_a_finished_render_waits_for_a_file_that_is_still_open(tmp_path, monkeypatch):
+    # Windows refuses to replace a file a player still has open: the swap retries instead of failing the clip
+    tmp, out = tmp_path / "new.mp4", tmp_path / "clip.mp4"
+    tmp.write_bytes(b"new")
+    out.write_bytes(b"old")
+    real_replace, calls = os.replace, []
+
+    def busy_once(src, dst):
+        calls.append(src)
+        if len(calls) == 1:
+            raise PermissionError("file is open")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", busy_once)
+    _replace_when_free(tmp, out, pause=0)
+    assert out.read_bytes() == b"new" and len(calls) == 2
 
 
 def test_the_explosive_style_loses_its_sound_effect(tmp_path):

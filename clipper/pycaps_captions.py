@@ -10,6 +10,7 @@ import importlib.resources as resources
 import json
 import os
 import shutil
+import time
 from pathlib import Path
 
 from clipper.captions import apply_caption_edits, clip_words, group_words

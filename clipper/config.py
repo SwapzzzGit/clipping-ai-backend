@@ -13,6 +13,8 @@ DEFAULTS: dict[str, Any] = {
     "output_dir": "output",
     "language": "en",
     "num_clips": 5,
+    "auto_clips": False,      # True: num_clips is a cap and only clips scoring >= auto_min_score are kept
+    "auto_min_score": 7.0,
     "ffmpeg_path": None,
     "llm": {
         "provider": "gemini",
@@ -47,6 +49,7 @@ DEFAULTS: dict[str, Any] = {
         "face_sample_fps": 3,
         "shot_change_threshold": 0.5,
         "captions": True,
+        "source_captions": "auto",   # auto | off: captions already in the picture
         "caption_words_per_line": 3,
         "caption_font": "Arial",
         "caption_font_size": 84,

@@ -4,6 +4,7 @@ work_dir: work            # per-video cache: work/<video_id>/
 output_dir: output        # finished clips: output/<video_id>/
 language: en              # subtitle language to look for
 num_clips: 5
+auto_min_score: 7.0      # "Auto" clip count keeps only clips scoring at least this (0-10)
 
 ffmpeg_path: null         # null = use ffmpeg on PATH (or imageio-ffmpeg if installed)
 
@@ -57,7 +58,9 @@ render:
   face_sample_fps: 3      # frames per second analysed for face tracking
   shot_change_threshold: 0.5  # histogram distance that counts as a camera cut
   captions: true
+  source_captions: auto   # auto | off: captions already burned into the picture (see clipper/source_text.py)
   caption_words_per_line: 3
+  caption_template: hype      # the default caption style: a pycaps template name, or "ours" for the ASS captions
   caption_font: Arial
   caption_font_size: 84
   caption_highlight: "&H0000E5FF"   # ASS BGR colour of the word being spoken (yellow)

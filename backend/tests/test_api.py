@@ -35,6 +35,50 @@ def test_create_job_validates_url_and_lengths():
     assert any(j["id"] == job["id"] for j in client.get("/api/jobs").json())
 
 
+def test_auto_clip_count_is_the_default_and_stores_its_cap():
+    r = client.post("/api/jobs", json={"url": "https://youtu.be/rDdoUbCFn24", "mode": "api", "rules": ""})
+    assert r.status_code == 201
+    assert r.json()["options"]["num_clips"] is None and r.json()["options"]["auto_max"] == 5
+
+
+def test_music_choice_is_checked_when_the_job_is_created():
+    url = "https://youtu.be/rDdoUbCFn24"
+    assert client.post("/api/jobs", json={"url": url, "mode": "api", "rules": "", "music": "nope.mp3"}).status_code == 422
+    r = client.post("/api/jobs", json={"url": url, "mode": "api", "rules": "", "music": "auto", "music_volume": 30})
+    assert r.status_code == 201 and r.json()["options"]["music"] == "auto" and r.json()["options"]["music_volume"] == 30
+    assert "tracks" in client.get("/api/music").json()
+
+
+def test_branding_upload_defaults_and_job_snapshot():
+    import cv2
+    import numpy as np
+
+    png = cv2.imencode(".png", np.zeros((30, 60, 4), np.uint8))[1].tobytes()
+    r = client.post("/api/branding/upload?name=test-logo.png", content=png, headers={"content-type": "image/png"})
+    assert r.status_code == 201 and r.json()["name"] == "test-logo.png"
+    assert client.post("/api/branding/upload?name=notes.txt", content=b"x").status_code == 422
+    assert client.put("/api/branding", json={"logo": "test-logo.png", "logo_position": "top-left"}).status_code == 200
+    assert client.put("/api/branding", json={"logo_position": "middle"}).status_code == 422
+    body = client.get("/api/branding").json()
+    assert body["defaults"]["logo"] == "test-logo.png" and len(body["positions"]) == 9
+    url = "https://youtu.be/rDdoUbCFn24"
+    job = client.post("/api/jobs", json={"url": url, "mode": "api", "rules": ""}).json()
+    assert job["options"]["branding"]["logo"] == "test-logo.png"
+    plain = client.post("/api/jobs", json={"url": url, "mode": "api", "rules": "", "use_branding": False}).json()
+    assert plain["options"]["branding"] is None
+    assert client.delete("/api/branding/files/test-logo.png").status_code == 409  # still the logo
+    client.put("/api/branding", json={"logo": None})
+    assert client.delete("/api/branding/files/test-logo.png").status_code == 204
+    assert client.get("/api/branding/files/test-logo.png").status_code == 404
+
+
+def test_clip_branding_override_checks_its_input():
+    job = client.post("/api/jobs", json={"url": "https://youtu.be/rDdoUbCFn24", "mode": "api", "rules": ""}).json()
+    path = f"/api/jobs/{job['id']}/clips/1/branding"
+    assert client.post(path, json={"logo_position": "middle-middle"}).status_code == 422
+    assert client.post(path, json={"logo_position": "top-left"}).status_code == 409  # queued: wait until it is done
+
+
 def test_settings_never_return_the_api_key():
     r = client.put("/api/settings", json={"llm_provider": "anthropic", "llm_api_key": "sk-secret-1234abcd"})
     body = r.json()
@@ -92,7 +136,7 @@ def test_review_and_cancel():
                        {"num_clips": 1, "min_sec": 20, "max_sec": 40, "language": "en", "rules": "", "captions": True})
     store.update(job["id"], status="done", clips=[{"id": 1, "review": {"approved": None, "notes": ""}}])
     r = client.patch(f"/api/jobs/{job['id']}/clips/1", json={"approved": True, "notes": "post Monday"})
-    assert r.json()["clips"][0]["review"] == {"approved": True, "notes": "post Monday"}
+    assert r.json()["clips"][0]["review"] == {"approved": True, "notes": "post Monday", "approved_by": "person"}
     assert client.post(f"/api/jobs/{job['id']}/cancel").status_code == 409
     assert client.post(f"/api/jobs/{job['id']}/retry", json={"from_stage": "selection"}).json()["status"] == "queued"
     assert client.post(f"/api/jobs/{job['id']}/cancel").json()["status"] == "cancelled"

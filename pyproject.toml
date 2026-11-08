@@ -10,6 +10,10 @@ dependencies = [
     "numpy>=1.26",
     "pyyaml>=6.0",
     "faster-whisper>=1.0",   # speech-to-text for uploaded videos
+    "rapidocr-onnxruntime>=1.4",   # reads captions already burned into the picture
+    # Caption styles (clipper/pycaps_captions.py). PyPI's "pycaps" is an unrelated package, so this is the GitHub release.
+    "pycaps @ git+https://github.com/francozanardi/pycaps@e2d36edfa08e3307d65b15bb20f17399dc2c9b40",
+    "playwright>=1.40",            # pycaps draws its captions in a headless browser (run: python -m playwright install chromium)
 ]
 
 [project.optional-dependencies]
@@ -29,3 +33,4 @@ include = ["clipper*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["slow: renders a real video with pycaps (about a minute)"]

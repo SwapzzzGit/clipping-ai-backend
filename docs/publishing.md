@@ -200,11 +200,10 @@ GET  /api/publish/platforms
 GET  /api/publish/accounts
 POST /api/publish/variants  {"source": "<job id or video id>", "account_ids": ["youtube-1a2b…", "tiktok-…"],
                              "clip_ids": [1, 2], "use_llm": false}
-POST /api/publish/jobs      {"source": "...", "targets": [{"clip_id": 1, "account_id": "...",
-                             "post": {"title": "...", "caption": "...", "hashtags": ["#x"], "privacy": "public"}}],
-                             "scheduled_at": "2026-11-01T18:00:00+00:00"}
 GET  /api/publish/jobs/<id> per-target status: scheduled/queued/uploading/processing/published/failed
 ```
+
+Posts are created only by the backend, after a person approves the clip (`POST /api/jobs/<id>/publish`). There is no create route here.
 
 Account statuses: `connected`, or `reconnect_needed` (refresh failed or access was revoked; run
 the start flow again for that platform).
@@ -217,24 +216,23 @@ Offline demo, which never touches a real platform:
 
 Tests: `.venv/Scripts/python -m pytest tests/publisher`
 
-### Categories and autopublish (Clipper Studio)
+### Categories and publishing (Clipper Studio)
 
 Clipper Studio builds on these endpoints. Most of the time you won't call them directly:
 
 ```http
 GET    /api/categories                 categories with their connected accounts
-POST   /api/categories                 {"name": "Finance", "account_ids": [...], "approval": "auto"|"manual",
-                                        "min_score": 7, "max_clips_per_video": 3, "spacing_minutes": 30,
+POST   /api/categories                 {"name": "Finance", "account_ids": [...], "spacing_minutes": 30,
                                         "hashtags": ["#finance"], "use_llm_captions": false, "rules": ""}
 PATCH  /api/categories/<id>            any of the fields above
 POST   /api/batches                    {"text": "https://youtu.be/…, finance\n…", "default_category": "finance",
                                         "num_clips": 5}   (or "items": [{"url", "category"}])
-POST   /api/jobs/<id>/publish          {"clip_ids"?, "account_ids"?, "scheduled_at"?}  approved clips only
+POST   /api/jobs/<id>/publish          {"clip_ids", "account_ids" (required), "scheduled_at"?}  approved clips only
 GET    /api/posts                      every clip × account with status, post URL and error
 ```
 
-A job remembers which (clip, account) pairs it has queued, so the render hook, approving a clip and the
-Publish button can never post the same clip to the same account twice. Removing an account from a
+A job remembers which (clip, account) pairs it has queued, so the Publish button can never post the same
+clip to the same account twice. Approving a clip does not post it; the person picks the accounts for each clip. Removing an account from a
 category stops future posts only. Anything already queued still goes out unless you cancel it.
 
 ## 6. Adding a platform

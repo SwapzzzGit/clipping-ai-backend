@@ -1,4 +1,4 @@
-"""Categories, batches, autopublish and the posts tracker, end to end against the mock platform."""
+"""Categories, batches, the approval gate and the posts tracker, end to end against the mock platform."""
 
 import json
 from urllib.parse import urlparse
@@ -6,7 +6,7 @@ from urllib.parse import urlparse
 from fastapi.testclient import TestClient
 
 from app import catalog
-from app.main import app, categories, publisher, store
+from app.main import app, categories, store
 from app.store import OUTPUT_DIR
 
 # Local host + loopback client: the publisher tunnel guard 404s anything that looks external.
@@ -46,11 +46,13 @@ def test_categories_crud_and_validation():
     r = client.post("/api/categories", json={"name": "Finance", "hashtags": ["money", "#investing"]})
     assert r.status_code == 201
     cat = r.json()
-    assert cat["id"] == "finance" and cat["hashtags"] == ["#money", "#investing"]
+    assert cat["id"] == "finance" and cat["hashtags"] == ["#money", "#investing"] and cat["approval"] == "manual"
     assert client.post("/api/categories", json={"name": "finance"}).status_code == 422  # duplicate, any case
     assert client.post("/api/categories", json={"approval": "auto"}).status_code == 422  # no name
-    r = client.patch("/api/categories/finance", json={"approval": "auto", "min_score": 8})
-    assert r.json()["approval"] == "auto" and r.json()["min_score"] == 8
+    assert client.post("/api/categories", json={"name": "Bots", "approval": "auto"}).status_code == 422
+    assert client.patch("/api/categories/finance", json={"approval": "auto"}).status_code == 422
+    r = client.patch("/api/categories/finance", json={"hashtags": ["money"], "min_score": 8})
+    assert r.json()["hashtags"] == ["#money"] and "min_score" not in r.json()
     assert client.patch("/api/categories/nope", json={"name": "x"}).status_code == 404
     assert any(c["id"] == "finance" for c in client.get("/api/categories").json())
 
@@ -87,63 +89,49 @@ def test_inbox_file_becomes_a_batch(tmp_path):
     assert any(j["url"].endswith("FFFFFFFFFFF") and j["category_id"] == "inbox-cat" for j in store.list())
 
 
-def test_auto_category_publishes_top_clips_to_every_account_once():
-    a1, a2 = connect_mock("fin_one"), connect_mock("fin_two")
-    other = connect_mock("not_in_category")
-    cat = categories.create({"name": "Auto Fin", "approval": "auto", "min_score": 8, "max_clips_per_video": 5,
-                             "account_ids": [a1["id"], a2["id"]], "hashtags": ["#finance"]})
-    job = rendered_job(cat["id"], scores=(8.5, 6.0, 9.1))
-
-    from app.main import autopub
-    publisher.start()
-    try:
-        autopub.on_rendered(job["id"])
-        after = store.get(job["id"])
-        approved = sorted(c["id"] for c in after["clips"] if c["review"].get("approved"))
-        assert approved == [1, 3]                          # 6.0 is below min_score
-        pairs = {(p["clip_id"], p["account_id"]) for p in after["publish"]["pairs"]}
-        assert pairs == {(c, a) for c in (1, 3) for a in (a1["id"], a2["id"])}
-        assert all(a != other["id"] for _, a in pairs)
-        assert publisher.wait_idle(10)
-
-        # Running the hook again (e.g. after a restart) must not post anything twice.
-        autopub.on_rendered(job["id"])
-        assert len(store.get(job["id"])["publish"]["jobs"]) == 1
-
-        pj = publisher.jobs.get(after["publish"]["jobs"][0])
-        assert {t["status"] for t in pj["targets"]} == {"published"}
-        assert all("#finance" in t["post"]["hashtags"] for t in pj["targets"])
-
-        rows = [r for r in client.get("/api/posts").json()["rows"] if r["job_id"] == job["id"]]
-        status = {(r["clip_id"], r["account_id"]): r["status"] for r in rows}
-        assert status[(1, a1["id"])] == "published" and status[(3, a2["id"])] == "published"
-        assert status[(2, a1["id"])] == "awaiting_review"   # not approved, so tracked as not posted yet
-    finally:
-        publisher.stop()
+def test_old_auto_setting_is_migrated_to_manual(tmp_path):
+    path = tmp_path / "categories.json"
+    path.write_text(json.dumps([{"id": "fin", "name": "Fin", "approval": "auto", "min_score": 8}]))
+    assert catalog.Categories(path).get("fin")["approval"] == "manual"
+    assert json.loads(path.read_text())[0]["approval"] == "manual"
+    assert (tmp_path / "categories.backup-before-auto-removal.json").is_file()
 
 
-def test_manual_category_publishes_only_on_approval():
+def test_only_a_person_approval_counts_for_publishing():
+    assert catalog.human_approved({"review": {"approved": True, "approved_by": "person"}})
+    assert not catalog.human_approved({"review": {"approved": True}})            # approved by no recorded person
+    assert not catalog.human_approved({"review": {"approved": True, "approved_by": "auto"}})
+    assert not catalog.human_approved({"review": {"approved": None}})
+    assert not catalog.human_approved({})
+
+
+def test_approving_posts_nothing_until_a_person_picks_accounts_for_the_clip():
     acct = connect_mock("motiv_main")
-    cat = categories.create({"name": "Manual Motiv", "approval": "manual", "account_ids": [acct["id"]]})
+    other = connect_mock("motiv_second")
+    cat = categories.create({"name": "Manual Motiv", "account_ids": [acct["id"]]})
     job = rendered_job(cat["id"])
-    from app.main import autopub
-
-    autopub.on_rendered(job["id"])
-    assert not store.get(job["id"]).get("publish")           # nothing posts without a person
+    assert not store.get(job["id"]).get("publish")           # rendering alone posts nothing
 
     r = client.patch(f"/api/jobs/{job['id']}/clips/2", json={"approved": True, "notes": ""})
     assert r.status_code == 200
-    pairs = store.get(job["id"])["publish"]["pairs"]
-    assert [(p["clip_id"], p["account_id"]) for p in pairs] == [(2, acct["id"])]
+    assert r.json()["clips"][1]["review"]["approved_by"] == "person"
+    assert not store.get(job["id"]).get("publish")           # approving alone posts nothing
 
-    # Publishing the same clip again through the button is refused as a duplicate.
-    assert client.post(f"/api/jobs/{job['id']}/publish", json={}).status_code == 409
+    # The person picks the account for this clip: only that clip goes to only that account.
+    url = f"/api/jobs/{job['id']}/publish"
+    assert client.post(url, json={"clip_ids": [2], "account_ids": [other["id"]]}).status_code == 200
+    pairs = store.get(job["id"])["publish"]["pairs"]
+    assert [(p["clip_id"], p["account_id"]) for p in pairs] == [(2, other["id"])]
+
+    assert client.post(url, json={"clip_ids": [2], "account_ids": [other["id"]]}).status_code == 409  # duplicate
+    assert client.post(url, json={"clip_ids": [1], "account_ids": [other["id"]]}).status_code == 409  # not approved
+    assert client.post(url, json={"clip_ids": [2]}).status_code == 422                               # no account
 
 
 def test_publish_button_with_explicit_accounts_and_schedule():
     acct = connect_mock("solo")
     job = rendered_job(None)
-    store.mutate(job["id"], lambda j: j["clips"][0]["review"].update(approved=True))
+    store.mutate(job["id"], lambda j: j["clips"][0]["review"].update(approved=True, approved_by="person"))
     assert client.post(f"/api/jobs/{job['id']}/publish", json={}).status_code == 422   # no category, no accounts
     r = client.post(f"/api/jobs/{job['id']}/publish",
                     json={"account_ids": [acct["id"]], "scheduled_at": "2030-01-01T09:00:00+00:00"})

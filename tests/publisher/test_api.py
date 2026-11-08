@@ -48,7 +48,7 @@ def test_oauth_flow_variants_job_and_status(data_dir, clip_source):
     assert v.status_code == 200 and len(v.json()) == 4
     targets = [{"clip_id": x["clip_id"], "account_id": x["account_id"],
                 "post": {"caption": "edited " + x["post"]["caption"]}} for x in v.json()]
-    job = client.post("/api/publish/jobs", json={"source": str(clip_source), "targets": targets}).json()
+    job = pub.create_job(str(clip_source), targets=targets)
     assert job["status"] == "queued" and all(t["post"]["caption"].startswith("edited") for t in job["targets"])
     pub.start()
     try:
@@ -58,6 +58,8 @@ def test_oauth_flow_variants_job_and_status(data_dir, clip_source):
     got = client.get(f"/api/publish/jobs/{job['id']}").json()
     assert got["status"] == "published" and all(t["url"] for t in got["targets"])
     assert client.get("/api/publish/jobs/nope").status_code == 404
+    # Posts are created only through the backend's approve-then-publish route, never from here.
+    assert client.post("/api/publish/jobs", json={}).status_code == 405
 
     client.patch(f"/api/publish/accounts/{a['id']}", json={"options": {"hashtags": ["#mine"]}})
     v2 = client.post("/api/publish/variants", json={"source": str(clip_source), "account_ids": [a["id"]],

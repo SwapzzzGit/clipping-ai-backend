@@ -1,11 +1,9 @@
-"""Categories, batch intake, autopublishing and the posts tracker.
+"""Categories, batch intake, publishing and the posts tracker.
 
 A **category** (finance, motivation, ...) groups connected accounts from any platforms; one
-account may sit in several categories. A clip job tagged with a category publishes to every
-account in it. Per category you decide how autonomous that is:
-
-    approval = "auto"    clips scoring >= min_score are approved and published as soon as they render
-    approval = "manual"  nothing posts until a person approves a clip; approving then publishes it
+account may sit in several categories. A category's accounts are pre-ticked when a person picks where
+an approved clip goes. Approving a clip never posts it: the person then chooses the accounts and publishes
+that clip. Nothing posts without an approval, and no code path can approve a clip on its own.
 
 Duplicate guard: a (job, clip, account) pair is only ever queued once, whatever path triggers it.
 
@@ -19,6 +17,7 @@ import csv
 import datetime as dt
 import re
 import secrets
+import shutil
 import threading
 from pathlib import Path
 
@@ -34,10 +33,7 @@ CATEGORY_DEFAULTS = {
     "description": "",
     "color": "#e0531f",
     "account_ids": [],
-    "approval": "manual",        # "auto" | "manual"
-    "autopublish": True,         # publish approved clips without a button press
-    "min_score": 7.0,            # auto approval threshold (0-10)
-    "max_clips_per_video": 3,    # auto approval publishes at most this many per video
+    "approval": "manual",        # always "manual": a person approves every clip (automatic approval was removed)
     "spacing_minutes": 0,        # gap between successive clips of one video (0 = all at once)
     "hashtags": [],              # added to every post in this category
     "use_llm_captions": False,   # write per-platform copy with the API-key LLM
@@ -55,7 +51,16 @@ class Categories:
         self._lock = threading.RLock()
         self._items: dict[str, dict] = {}
         if path.is_file():
-            for c in read_json(path):
+            data = read_json(path)
+            if any(c.get("approval") == "auto" for c in data):
+                # Automatic approval was removed: keep the old file, then switch those categories to manual.
+                shutil.copy2(path, path.with_name("categories.backup-before-auto-removal.json"))
+                for c in data:
+                    c["approval"] = "manual"
+                write_json(path, data)
+                log.warning("categories: automatic approval was removed; affected categories are now manual "
+                            "(backup: categories.backup-before-auto-removal.json)")
+            for c in data:
                 self._items[c["id"]] = {**CATEGORY_DEFAULTS, **c}
 
     def list(self) -> list[dict]:
@@ -127,9 +132,15 @@ def _clean(data: dict) -> dict:
         out["hashtags"] = [t if t.startswith("#") else f"#{t}" for t in tags]
     if "account_ids" in out:
         out["account_ids"] = list(dict.fromkeys(out["account_ids"]))
-    if "approval" in out and out["approval"] not in ("auto", "manual"):
-        raise ValueError("approval must be 'auto' or 'manual'")
+    if "approval" in out and out["approval"] != "manual":
+        raise ValueError("Clips are approved by a person. Automatic approval is not available.")
     return out
+
+
+def human_approved(clip: dict) -> bool:
+    """The one check every publish path uses. Only an approval made in the review screen counts."""
+    review = clip.get("review") or {}
+    return review.get("approved") is True and review.get("approved_by") == "person"
 
 
 # -- batch intake -----------------------------------------------------------------------------
@@ -191,43 +202,16 @@ def ingest_inbox(create_batch) -> list[str]:
     return done
 
 
-# -- autopublish ----------------------------------------------------------------------------------
+# -- publishing -----------------------------------------------------------------------------------
 
 class AutoPublisher:
-    """Turns category rules into publish jobs, without ever queueing a (clip, account) pair twice."""
+    """Turns approved clips into publish jobs, without ever queueing a (clip, account) pair twice."""
 
     def __init__(self, store: JobStore, cats: Categories, publisher):
         self.store = store
         self.cats = cats
         self.pub = publisher
         self._lock = threading.Lock()
-
-    def on_rendered(self, job_id: str) -> None:
-        """Called by the worker when a job finishes rendering."""
-        job = self.store.get(job_id)
-        cat = self.cats.get(job.get("category_id")) if job else None
-        if not job or job["status"] != "done" or not cat:
-            return
-        if cat["approval"] == "auto":
-            ok = [c for c in job["clips"] if c.get("status", "ok") == "ok" and c.get("score", 0) >= cat["min_score"]]
-            chosen = sorted(ok, key=lambda c: c.get("score", 0), reverse=True)[: cat["max_clips_per_video"]]
-            ids = {c["id"] for c in chosen}
-
-            def approve(j):
-                for c in j["clips"]:
-                    if c["id"] in ids and (c.get("review") or {}).get("approved") is None:
-                        c["review"] = {**(c.get("review") or {}), "approved": True, "approved_by": "auto"}
-            self.store.mutate(job_id, approve)
-            self.store.log(job_id, "info", f"Auto-approved {len(ids)} clip(s) scoring >= {cat['min_score']} "
-                                           f"for category {cat['name']}")
-        if cat["autopublish"]:
-            self.publish_approved(job_id, reason="autopublish")
-
-    def on_review(self, job_id: str, clip_id: int, approved: bool | None) -> None:
-        job = self.store.get(job_id)
-        cat = self.cats.get(job.get("category_id")) if job else None
-        if approved and cat and cat["autopublish"]:
-            self.publish_approved(job_id, clip_ids=[clip_id], reason="approved")
 
     def publish_approved(self, job_id: str, clip_ids: list[int] | None = None, account_ids: list[str] | None = None,
                          reason: str = "manual", scheduled_at: str | None = None) -> dict | None:
@@ -240,7 +224,7 @@ class AutoPublisher:
             accounts = account_ids if account_ids is not None else (cat["account_ids"] if cat else [])
             connected = {a["id"]: a for a in self.pub.accounts.list()}
             accounts = [a for a in accounts if a in connected and connected[a].get("status", "connected") == "connected"]
-            clips = [c for c in job["clips"] if c.get("status", "ok") == "ok" and (c.get("review") or {}).get("approved")
+            clips = [c for c in job["clips"] if c.get("status", "ok") == "ok" and human_approved(c)
                      and (clip_ids is None or c["id"] in clip_ids)]
             done_pairs = {(p["clip_id"], p["account_id"]) for p in (job.get("publish") or {}).get("pairs", [])}
             pairs = [(c, a) for c in sorted(clips, key=lambda c: c.get("score", 0), reverse=True) for a in accounts

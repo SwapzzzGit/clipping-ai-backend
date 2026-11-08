@@ -137,6 +137,59 @@ def _clean(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+ARROWS = re.compile(r">>+")
+SOUND_TAGS = re.compile(r"\((?:laughs|laughter|music|applause)\)", re.I)
+
+
+def _norm(word: str) -> str:
+    return re.sub(r"[^a-z0-9']", "", word.lower())
+
+
+def _collapse_repeats(items: list[tuple[int, str, str]]) -> list[tuple[int, str, str]]:
+    """Drop a phrase that repeats right after itself, across the whole stream of caption words.
+
+    Rolling auto-captions show the same words again on the next line: "X Y Z. X Y" + "Z." or "were able" +
+    "were able to". A repeat of three or more words is dropped anywhere; a two-word repeat only when it
+    crosses from one caption line into the next. Items are (line, word, normalised word).
+    """
+    out, i = [], 0
+    while i < len(items):
+        for k in range(min(12, (len(items) - i) // 2), 1, -1):
+            first, second = items[i:i + k], items[i + k:i + 2 * k]
+            if all(a[2] == b[2] for a, b in zip(first, second)) and (k >= 3 or first[-1][0] != second[0][0]):
+                out += first
+                i += 2 * k
+                break
+        else:
+            out.append(items[i])
+            i += 1
+    return out
+
+
+def clean_segments(segments: list[dict]) -> list[dict]:
+    """Make caption lines fit for subtitles and for the picker.
+
+    Removes speaker arrows (">>") and sound tags, and drops repeated words. Speaker changes stay as flags
+    on the word timings. A line whose words changed loses its word timings, so its captions are spread
+    evenly over the line instead of showing the removed words.
+    """
+    tokens = [SOUND_TAGS.sub(" ", ARROWS.sub(" ", s["text"])).split() for s in segments]
+    items = [(i, w, _norm(w)) for i, line in enumerate(tokens) for w in line]
+    kept = _collapse_repeats(items)
+    by_line: dict[int, list[str]] = {}
+    for i, w, _ in kept:
+        by_line.setdefault(i, []).append(w)
+    cleaned = []
+    for i, s in enumerate(segments):
+        words = by_line.get(i, [])
+        if not words:
+            continue
+        changed = len(words) != len(tokens[i])
+        timed = [] if changed and s["words"] else s["words"]
+        cleaned.append({**s, "text": " ".join(words), "words": timed})
+    return cleaned
+
+
 def heatmap_from_info(info: dict) -> list[dict]:
     return [
         {"start_sec": h["start_time"], "end_sec": h["end_time"], "value": h["value"]}
@@ -152,7 +205,7 @@ def get_transcript(info: dict, work: Path, lang: str, force: bool = False) -> di
         cached = read_json(cache)
         if cached.get("requested_lang") == lang:
             log.info("transcript cached (%s captions, %d segments)", cached["source"], len(cached["segments"]))
-            return cached
+            return {**cached, "segments": clean_segments(cached["segments"])}  # older caches still have the arrows
 
     source, key, url = pick_subtitle_track(info, lang)
     log.info("downloading %s captions (%s)", source, key)
@@ -160,7 +213,7 @@ def get_transcript(info: dict, work: Path, lang: str, force: bool = False) -> di
         raw = json.loads(ydl.urlopen(url).read().decode("utf-8"))
     write_json(work / f"subs.{key}.json3", raw)
 
-    segments = parse_json3(raw)
+    segments = clean_segments(parse_json3(raw))
     if not segments:
         raise ClipperError("Caption track is empty.")
     result = {

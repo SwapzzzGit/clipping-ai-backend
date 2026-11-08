@@ -69,6 +69,22 @@ def has_audio(ffmpeg: str, path: str | Path) -> bool:
     return "Audio:" in proc.stderr
 
 
+def parse_fps(ffmpeg_output: str) -> float | None:
+    """Frame rate of the first video stream, read from `ffmpeg -i` output."""
+    for line in ffmpeg_output.splitlines():
+        if "Video:" not in line:
+            continue
+        m = re.search(r"(\d+(?:\.\d+)?) fps", line) or re.search(r"(\d+(?:\.\d+)?) tbr", line)
+        return float(m.group(1)) if m else None
+    return None
+
+
+def video_fps(ffmpeg: str, path: str | Path) -> float:
+    """Frame rate of a video file; 30 when ffmpeg reports none."""
+    proc = subprocess.run([ffmpeg, "-hide_banner", "-i", str(path)], capture_output=True, text=True, errors="replace")
+    return parse_fps(proc.stderr) or 30.0
+
+
 def js_runtime() -> str | None:
     """yt-dlp needs a JS runtime for YouTube challenges; it defaults to deno, so fall back to node."""
     if shutil.which("deno"):

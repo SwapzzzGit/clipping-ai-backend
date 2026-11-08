@@ -9,9 +9,11 @@ from pathlib import Path
 from clipper import __version__
 from clipper.candidates import find_clips
 from clipper.config import load_campaign_rules
+from clipper.cuts import apply_cuts
 from clipper.download import download_clips
 from clipper.llm import LLM
-from clipper.reframe import FaceDetector, analyze
+from clipper.reframe import ANALYSIS_VERSION, FaceDetector, analyze
+from clipper.pycaps_captions import clip_caption_template
 from clipper.render import render_clip
 from clipper.transcript import get_transcript, load_or_fetch_info
 from clipper.util import ClipperError, find_ffmpeg, hms, log, mmss, read_json, slugify, write_json
@@ -91,8 +93,9 @@ def render_clips(clips: list[dict], raws: dict[int, dict], work: Path, out_dir: 
             out = out_dir / f"{c['id']:02d}_{slugify(c['title'])}.mp4"
             analysis_path = work / "analysis" / (Path(raw["path"]).stem + ".json")
             try:
-                if analysis_path.is_file() and not redo_analysis:
-                    analysis = read_json(analysis_path)
+                cached = read_json(analysis_path) if analysis_path.is_file() and not redo_analysis else {}
+                if cached.get("version") == ANALYSIS_VERSION:
+                    analysis = cached
                 else:
                     detector = detector or FaceDetector(Path(cfg["work_dir"]) / ".models")
                     log.info("clip %d: face tracking", c["id"])
@@ -101,7 +104,14 @@ def render_clips(clips: list[dict], raws: dict[int, dict], work: Path, out_dir: 
                     write_json(analysis_path, analysis)
                 meta_path = out.with_suffix(".render.json")
                 key = {"raw": Path(raw["path"]).name, "start_sec": c["start_sec"], "end_sec": c["end_sec"],
-                       "render": cfg["render"]}
+                       "render": cfg["render"], "music": c.get("music"), "branding": c.get("branding"),
+                       "caption_template": clip_caption_template(c, cfg)}  # a new caption style re-renders the clip
+                if c.get("cuts"):  # a clip with words cut out is re-rendered when its cuts change
+                    key["cuts"] = c["cuts"]
+                if c.get("caption_style"):  # and when its captions are restyled; clips without a style keep their cache
+                    key["caption_style"] = c["caption_style"]
+                if c.get("caption_text"):  # and when a caption word is corrected
+                    key["caption_text"] = c["caption_text"]
                 cached = read_json(meta_path) if meta_path.is_file() else {}
                 if out.is_file() and cached.get("key") == key and not redo_render:
                     log.info("clip %d: already rendered", c["id"])
@@ -109,6 +119,8 @@ def render_clips(clips: list[dict], raws: dict[int, dict], work: Path, out_dir: 
                 else:
                     log.info("clip %d: rendering %s", c["id"], out.name)
                     rendered = render_clip(raw, c, analysis, segments, out, cfg, ffmpeg)
+                    if c.get("cuts"):
+                        rendered = apply_cuts(ffmpeg, out, rendered, c["cuts"], cfg["render"])
                     write_json(meta_path, {"key": key, "result": rendered})
                 results[c["id"]] = {"status": "ok", "file": out.name, "analysis": analysis, **rendered}
             except ClipperError as e:
@@ -174,6 +186,7 @@ def build_manifest(info, transcript, clips, results, llm: dict, cfg, rules, url,
                 "source_resolution": f"{a['width']}x{a['height']}" if a else None,
             } if a else None,
             "caption_words": r.get("caption_words"),
+            "cuts_baked": r.get("cuts_baked") or [],
             "review": {"approved": None, "notes": "", "marks": [], "trims": []},
         })
     return {

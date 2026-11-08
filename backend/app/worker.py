@@ -13,11 +13,13 @@ import time
 from pathlib import Path
 
 from app import REPO_ROOT, claude_bridge
-from app.store import OUTPUT_DIR, UPLOADS_DIR, WORK_DIR, JobStore, Settings, now
+from app.store import BRAND_DIR, OUTPUT_DIR, UPLOADS_DIR, WORK_DIR, JobStore, Settings, now
 from clipper.action import find_action_picks
-from clipper.candidates import find_clips, normalize_external_picks
+from clipper.candidates import find_clips, normalize_external_picks, words_text
 from clipper.config import load_config
-from clipper.download import download_clips
+from clipper.download import BOT_BLOCK_HELP, download_clips, is_bot_block
+from clipper.branding import clip_branding
+from clipper.music import clip_music
 from clipper.llm import LLM
 from clipper.local import find_upload, get_local_transcript, is_upload, load_upload_info, upload_id_from_url
 from clipper.pipeline import llm_info, render_clips, write_outputs
@@ -101,10 +103,12 @@ class Worker:
 
     def config_for(self, job: dict) -> dict:
         o = job["options"]
+        auto = o["num_clips"] is None   # "Auto": the AI decides how many clips, up to auto_max
         overrides = {
             "work_dir": str(WORK_DIR),
             "output_dir": str(OUTPUT_DIR),
-            "num_clips": o["num_clips"],
+            "num_clips": o.get("auto_max", 5) if auto else o["num_clips"],
+            "auto_clips": auto,
             "language": o["language"],
             "clips": {"min_sec": o["min_sec"], "max_sec": o["max_sec"]},
             "render": {"captions": o["captions"]},
@@ -172,10 +176,23 @@ class Worker:
             raws = download_clips(job["url"], clips, work, cfg, ffmpeg, info.get("duration") or 0,
                                   local_src=local_src)
             self._check_cancel(job_id)
+            if raws and all(r.get("blocked") for r in raws.values()):
+                raise ClipperError(BOT_BLOCK_HELP)  # nothing could be fetched: say why, at the top of the job
 
+            opts = job["options"]
+            for c in clips:
+                c["text"] = words_text(transcript["segments"], c["start_sec"], c["end_sec"])  # the cleaned transcript
+                c["music"] = clip_music(c, opts.get("music"), opts.get("music_volume", 20))
+                c["branding"] = clip_branding(opts.get("branding"), c.get("branding_override"), BRAND_DIR, work,
+                                              cfg["render"]["width"], cfg["render"]["height"])
+                if c["branding"]:
+                    self.store.log(job_id, "info", f"Clip {c['id']}: branding {sorted(k for k, v in c['branding'].items() if v)}")
+                if c["music"]:
+                    self.store.log(job_id, "info", f"Clip {c['id']}: background music {c['music']['name']}")
             self._progress(job_id, "render", 0, len(clips), "Face tracking, captions, 9:16 encode")
             out_dir = OUTPUT_DIR / job_id
             results = render_clips(clips, raws, work, out_dir, transcript["segments"], cfg, ffmpeg,
+                                   redo_render=bool(job.get("force_render")),
                                    on_clip=lambda d, t: self._progress(job_id, "render", d, t,
                                                                        f"Rendered {d} of {t}"))
             sel = job["selection"] or {}
@@ -186,11 +203,13 @@ class Worker:
         except Cancelled:
             self.store.update(job_id, status="cancelled", progress={"done": 0, "total": 0, "message": "Cancelled"})
         except ClipperError as e:
-            self.store.log(job_id, "error", str(e))
-            self.store.update(job_id, status="failed", error=str(e), finished_at=now())
+            blocked = is_bot_block(str(e))  # YouTube's bot check: the person can continue with an uploaded file
+            message = BOT_BLOCK_HELP if blocked else str(e)
+            self.store.log(job_id, "error", message)
+            self.store.update(job_id, status="failed", error=message, blocked=blocked, finished_at=now())
         except Exception as e:
             logging.getLogger("clipper.worker").exception("job %s crashed", job_id)
-            self.store.update(job_id, status="failed", error=f"Unexpected error: {e}", finished_at=now())
+            self.store.update(job_id, status="failed", error=f"Unexpected error: {e}", blocked=False, finished_at=now())
         finally:
             self.current_job = None
 
@@ -201,7 +220,7 @@ class Worker:
             for c in clips:
                 c["review"] = reviews.get(c["id"]) or c["review"]
             ok = sum(1 for c in clips if c["status"] == "ok")
-            job.update(clips=clips, stage="done", status="done" if ok else "failed",
+            job.update(clips=clips, stage="done", status="done" if ok else "failed", force_render=False,
                        error=None if ok else "No clip could be rendered; see the log.",
                        progress={"done": ok, "total": total, "message": f"{ok} clips ready"},
                        finished_at=now())

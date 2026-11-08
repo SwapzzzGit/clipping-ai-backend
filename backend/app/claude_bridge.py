@@ -23,7 +23,7 @@ import subprocess
 from pathlib import Path
 
 from app.store import TASKS_DIR
-from clipper.candidates import SENTENCE_END
+from clipper.candidates import SENTENCE_END, split_rules
 from clipper.util import hms, mmss, write_json
 
 TASK_PROMPT = (
@@ -64,7 +64,18 @@ def write_task(job: dict, info: dict, transcript: dict, cfg: dict, rules: str) -
             "\n".join(f"{h['start_sec']:.0f}-{h['end_sec']:.0f}s ({mmss(h['start_sec'])}) replay intensity {h['value']:.2f}"
                       for h in sorted(peaks, key=lambda h: h["start_sec"])) + "\n", encoding="utf-8")
     n, mn, mx = cfg["num_clips"], cfg["clips"]["min_sec"], cfg["clips"]["max_sec"]
-    rules_md = f"\n## Campaign rules (HARD constraints)\n\n{rules}\n" if rules else ""
+    if cfg.get("auto_clips"):
+        pick = (f"Pick **up to {n}** moments from this video that would plausibly go viral as vertical short-form clips "
+                "(TikTok / Reels / Shorts). Fewer strong clips beat weak ones, but give at least one, and score strictly "
+                "(7+ only for clips worth posting).")
+        main_picks = "main picks"
+    else:
+        pick = (f"Pick the **{n}** moments from this video most likely to perform as vertical short-form clips "
+                "(TikTok / Reels / Shorts).")
+        main_picks = f"{n} main picks"
+    hard, preferred = split_rules(rules or "")
+    rules_md = (f"\n## Campaign rules (HARD constraints)\n\n{hard}\n" if hard else "") + (
+        f"\n## Preferences (weigh these when choosing between good moments)\n\n{preferred}\n" if preferred else "")
     heat_md = ("- `heatmap.txt`: YouTube \"Most replayed\" peaks. Treat them as a tie-breaker, not a requirement.\n"
                if peaks else "")
     (d / "task.md").write_text(f"""# Clip selection task: job {job['id']}
@@ -75,8 +86,7 @@ def write_task(job: dict, info: dict, transcript: dict, cfg: dict, rules: str) -
 
 ## Your job
 
-Pick the **{n}** moments from this video most likely to perform as vertical short-form clips
-(TikTok / Reels / Shorts). Everything else (downloading, face-tracked 9:16 cropping, captions)
+{pick} Everything else (downloading, face-tracked 9:16 cropping, captions)
 is done by code after you answer, so only choose the moments.
 
 Judge each candidate on:
@@ -92,6 +102,7 @@ Rules for every clip:
 - ends right after a complete thought, never mid-sentence
 - `hook_line` must be the clip's first sentence copied **verbatim** from the transcript; the code
   uses it to find the exact start word
+- `music_mood`: the background-music mood that suits the clip: calm, upbeat, tense, emotional, serious or funny
 {rules_md}
 ## Inputs
 
@@ -100,7 +111,7 @@ Rules for every clip:
 ## Output
 
 Write `selection.json` in this folder, exactly this shape, best clip first. You may add up to 2
-extra alternates after the {n} main picks; they are used only if a main pick turns out invalid.
+extra alternates after the {main_picks}; they are used only if a main pick turns out invalid.
 
 ```json
 {{
@@ -111,6 +122,7 @@ extra alternates after the {n} main picks; they are used only if a main pick tur
       "title": "Punchy title, max 60 characters",
       "hook_line": "Exact first sentence of the clip.",
       "reason": "One line on why this will perform.",
+      "music_mood": "calm",
       "score": 8.5,
       "score_breakdown": {{"hook_strength": 9, "emotion": 7, "suspense_or_curiosity": 8,
                           "controversy_or_surprise": 6, "standalone_clarity": 9}}

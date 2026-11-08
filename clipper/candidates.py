@@ -16,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from clipper.llm import LLM
+from clipper.music import DEFAULT_MOOD, clean_mood
 from clipper.util import ClipperError, extract_json, log, read_json, write_json
 
 CRITERIA = ["hook_strength", "emotion", "suspense_or_curiosity", "controversy_or_surprise", "standalone_clarity"]
@@ -33,26 +34,44 @@ Be harsh: most windows are 2-5; reserve 8+ for genuinely exceptional moments.
 Reply with ONLY this JSON, one entry per window id:
 {"scores": [{"id": 0, "hook_strength": 0, "emotion": 0, "suspense_or_curiosity": 0, "controversy_or_surprise": 0, "standalone_clarity": 0, "violates_rules": false, "reason": "one short line"}]}"""
 
-PASS2_SYSTEM = """You are a senior short-form video editor. From the candidate regions of a long video, choose the
-{n} best short-form clips (TikTok/Reels/Shorts). Each transcript line is prefixed with its start time in seconds.
-Rules for every clip:
+PASS2_RULES = """Rules for every clip:
 - start_sec is the start time of a line that opens with a strong hook sentence (no "and", "so", "but yeah" openers)
 - end_sec is right after a complete thought ends (the end of a sentence, never mid-sentence)
 - {min_s}-{max_s} seconds long
 - clips must not overlap each other; at most one clip per region unless the region is long
 - title: punchy, <= 60 characters, no clickbait lies; hook_line: the clip's exact first sentence
+- music_mood: the background-music mood that suits the clip: calm, upbeat, tense, emotional, serious or funny
 Reply with ONLY this JSON:
-{{"clips": [{{"region_id": 0, "start_sec": 0.0, "end_sec": 0.0, "title": "", "hook_line": "", "reason": "why this will perform"}}]}}"""
+{{"clips": [{{"region_id": 0, "start_sec": 0.0, "end_sec": 0.0, "title": "", "hook_line": "", "reason": "why this will perform", "music_mood": "calm"}}]}}"""
+
+PASS2_SYSTEM = """You are a senior short-form video editor. From the candidate regions of a long video, choose the
+{n} best short-form clips (TikTok/Reels/Shorts). Each transcript line is prefixed with its start time in seconds.
+""" + PASS2_RULES
+
+PASS2_AUTO_SYSTEM = """You are a senior short-form video editor. From the candidate regions of a long video, choose up to
+{n} short-form clips (TikTok/Reels/Shorts) that would plausibly go viral on their own. Pick only strong moments: fewer
+clips beat weak ones, but always return at least one. Each transcript line is prefixed with its start time in seconds.
+""" + PASS2_RULES
+
+
+def split_rules(rules: str) -> tuple[str, str]:
+    """(hard, preferred): lines that start with "DO" are preferences to weigh; every other line is a hard limit."""
+    hard, preferred = [], []
+    for line in (rules or "").splitlines():
+        (preferred if line.strip().upper().startswith("DO ") else hard).append(line)
+    return "\n".join(hard).strip(), "\n".join(preferred).strip()
 
 
 def rules_block(rules: str) -> str:
-    if not rules:
-        return ""
-    return (
-        "\n\nHARD CONSTRAINTS (campaign rules). These override everything else. Never select or "
-        "favour content that breaks a DON'T rule; if a window breaks one, set every score to 0 and "
-        f'"violates_rules": true.\n{rules}'
-    )
+    hard, preferred = split_rules(rules)
+    block = ""
+    if hard:
+        block += ("\n\nHARD CONSTRAINTS (campaign rules). These override everything else. Never select or "
+                  "favour content that breaks a DON'T rule; if a window breaks one, set every score to 0 and "
+                  f'"violates_rules": true.\n{hard}')
+    if preferred:
+        block += f"\n\nPREFERENCES (weigh these between good moments; missing one is not a violation):\n{preferred}"
+    return block
 
 
 # -- windows -------------------------------------------------------------------------
@@ -224,9 +243,17 @@ def boundaries(segments: list[dict]) -> dict[str, list[float]]:
 
 
 def _words(segments: list[dict]) -> list[dict]:
-    words = [w for s in segments for w in s["words"]]
-    if not words:  # manual subs: treat each caption segment as a pseudo-word
-        words = [{"start": s["start_sec"], "end": s["end_sec"], "text": s["text"]} for s in segments]
+    """Every word of the transcript in time order. A line without word timings (YouTube's auto-captions
+    often have some) has its words spread evenly over its time, so its sentence ends and text still count."""
+    words = []
+    for s in segments:
+        if s["words"]:
+            words += s["words"]
+            continue
+        tokens = s["text"].split()
+        span = (s["end_sec"] - s["start_sec"]) / max(1, len(tokens))
+        words += [{"start": s["start_sec"] + i * span, "end": s["start_sec"] + (i + 1) * span, "text": tok}
+                  for i, tok in enumerate(tokens)]
     return words
 
 
@@ -248,6 +275,11 @@ def snap_mark(source: float, kind: str, segments: list[dict], lo: float, hi: flo
 
 def words_text(segments: list[dict], start: float, end: float) -> str:
     return " ".join(w["text"] for w in _words(segments) if w["start"] >= start - 0.01 and w["end"] <= end + 0.01)
+
+
+def words_between(segments: list[dict], start: float, end: float) -> list[dict]:
+    """The transcript's words that fall inside a clip's range, in time order."""
+    return [w for w in _words(segments) if w["start"] >= start - 0.01 and w["end"] <= end + 0.01]
 
 
 def _nearest(points: list[float], t: float, tol: float, lo: float = float("-inf"), hi: float = float("inf")):
@@ -280,7 +312,7 @@ def align_hook(hook: str, approx: float, segments: list[dict], before: float = 1
     want = [t for t in (_norm(x) for x in hook.split()) if t][:5]
     if len(want) < 2:
         return None
-    words = [w for s in segments for w in s["words"] if approx - before <= w["start"] <= approx + after]
+    words = [w for w in _words(segments) if approx - before <= w["start"] <= approx + after]
     toks = [_norm(w["text"]) for w in words]
     for i in range(len(words) - len(want) + 1):
         if toks[i : i + len(want)] == want:
@@ -289,21 +321,17 @@ def align_hook(hook: str, approx: float, segments: list[dict], before: float = 1
 
 
 def fit_clip(start: float, end: float, b: dict, cfg: dict, snap_start: bool = True) -> tuple[float, float] | None:
-    """Snap to sentence boundaries and force the length into [min_sec, max_sec]."""
+    """Snap the start to a sentence start, and end on a sentence end inside [min_sec, max_sec].
+
+    A clip never ends mid-sentence: if no sentence end fits the length limits, the pick is dropped.
+    """
     mn, mx, tol = cfg["clips"]["min_sec"], cfg["clips"]["max_sec"], cfg["clips"]["snap_tolerance_sec"]
     if snap_start:
         start = snap(start, b, "start", tol)
-    end = snap(end, b, "end", tol, lo=start + mn, hi=start + mx)
-    if end - start > mx or end - start < mn:
-        # The requested end is unusable: take the last sentence end that fits, else a pause/word end.
-        for key in ("strong_end", "weak_end", "word_end"):
-            fits = [p for p in b[key] if start + mn <= p <= start + mx]
-            if fits:
-                target = min(max(end, start + mn), start + mx)
-                end = min(fits, key=lambda p: abs(p - target))
-                break
-        else:
-            return None
+    ends = [p for p in b["strong_end"] if start + mn <= p <= start + mx]
+    if not ends:
+        return None
+    end = min(ends, key=lambda p: abs(p - end))
     return round(start, 3), round(end, 3)
 
 
@@ -364,10 +392,19 @@ def clip_score(start: float, end: float, windows: list[dict]) -> dict:
     }
 
 
+def keep_strong(clips: list[dict], cfg: dict) -> list[dict]:
+    """Auto count: keep the clips that score well, and always keep the best one."""
+    if not cfg.get("auto_clips"):
+        return clips
+    ranked = sorted(clips, key=lambda c: c["score"], reverse=True)
+    return [c for c in ranked if c["score"] >= cfg["auto_min_score"]] or ranked[:1]
+
+
 def select_clips(regions, segments, scored_windows, llm: LLM, cfg: dict, rules: str) -> list[dict]:
     n = cfg["num_clips"]
     b = boundaries(segments)
-    system = PASS2_SYSTEM.format(n=n, min_s=cfg["clips"]["min_sec"], max_s=cfg["clips"]["max_sec"]) + rules_block(rules)
+    template = PASS2_AUTO_SYSTEM if cfg.get("auto_clips") else PASS2_SYSTEM
+    system = template.format(n=n, min_s=cfg["clips"]["min_sec"], max_s=cfg["clips"]["max_sec"]) + rules_block(rules)
     user = "\n\n".join(
         f"### Region {r['id']} ({r['start_sec']:.1f}s-{r['end_sec']:.1f}s, pass-1 score {r['score']:.1f})\n"
         + region_text(r, segments)
@@ -415,6 +452,7 @@ def select_clips(regions, segments, scored_windows, llm: LLM, cfg: dict, rules: 
             "title": str(p.get("title", "")).strip()[:80],
             "hook_line": hook,
             "reason": str(p.get("reason", "")).strip(),
+            "music_mood": clean_mood(p.get("music_mood")),
             "selected_by": "llm",
         })
         used_regions.add(r["id"])
@@ -431,7 +469,7 @@ def select_clips(regions, segments, scored_windows, llm: LLM, cfg: dict, rules: 
             continue
         chosen.append({
             "start_sec": fitted[0], "end_sec": fitted[1], "title": "", "hook_line": "",
-            "reason": w["scores"]["reason"], "selected_by": "fallback",
+            "reason": w["scores"]["reason"], "music_mood": DEFAULT_MOOD, "selected_by": "fallback",
         })
 
     for c in chosen:
@@ -441,6 +479,7 @@ def select_clips(regions, segments, scored_windows, llm: LLM, cfg: dict, rules: 
             c["hook_line"] = re.split(r"(?<=[.?!])\s", c["text"], maxsplit=1)[0][:160]
         if not c["title"]:
             c["title"] = c["hook_line"][:60]
+    chosen = keep_strong(chosen, cfg)
     chosen.sort(key=lambda c: c["score"], reverse=True)
     return [{"id": i + 1, **c} for i, c in enumerate(chosen)]
 
@@ -450,7 +489,8 @@ def select_clips(regions, segments, scored_windows, llm: LLM, cfg: dict, rules: 
 
 def find_clips(transcript: dict, work: Path, llm: LLM, cfg: dict, rules: str, force: bool = False) -> list[dict]:
     cache = work / "clips.json"
-    meta = {"model": llm.name, "num_clips": cfg["num_clips"], "clips": cfg["clips"], "windows": cfg["windows"],
+    meta = {"model": llm.name, "num_clips": cfg["num_clips"], "auto_clips": cfg.get("auto_clips", False),
+            "clips": cfg["clips"], "windows": cfg["windows"],
             "scoring": cfg["scoring"], "rules": hashlib.sha1(rules.encode()).hexdigest()[:10]}
     if cache.is_file() and not force:
         cached = read_json(cache)
@@ -530,11 +570,13 @@ def normalize_external_picks(picks: list[dict], transcript: dict, cfg: dict) -> 
             "title": (str(p.get("title") or "").strip() or hook)[:80],
             "hook_line": hook, "reason": str(p.get("reason") or "").strip(),
             "selected_by": p.get("selected_by", "claude"),
+            "music_mood": clean_mood(p.get("music_mood")),
             "score": round(score, 2),
             "score_breakdown": {k: v for k, v in breakdown.items() if isinstance(v, (int, float))},
             "heatmap": heat_for(fitted[0], fitted[1], heatmap),
             "text": text,
         })
+    chosen = keep_strong(chosen, cfg)
     chosen.sort(key=lambda c: c["score"], reverse=True)
     return [{"id": i + 1, **c} for i, c in enumerate(chosen)]
 

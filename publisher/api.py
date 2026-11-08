@@ -36,24 +36,9 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from publisher import config
-from publisher.models import NotConfigured, PublishError, parse_time
+from publisher.models import NotConfigured, PublishError
 from publisher.public_url import TunnelProvider
 from publisher.service import Publisher
-
-
-class PostIn(BaseModel):
-    title: str | None = None
-    caption: str | None = None
-    hashtags: list[str] | None = None
-    privacy: str | None = None
-    options: dict | None = None
-
-
-class TargetIn(BaseModel):
-    clip_id: int
-    account_id: str
-    post: PostIn | None = None
-    scheduled_at: str | None = None
 
 
 class VariantsIn(BaseModel):
@@ -61,15 +46,6 @@ class VariantsIn(BaseModel):
     account_ids: list[str]
     clip_ids: list[int] | None = None
     use_llm: bool = False
-
-
-class JobIn(BaseModel):
-    source: str
-    targets: list[TargetIn] | None = None     # edited variants; or give account_ids (+ clip_ids)
-    account_ids: list[str] | None = None
-    clip_ids: list[int] | None = None
-    use_llm: bool = False
-    scheduled_at: str | None = None          # ISO 8601; omitted = now
 
 
 class AccountPatch(BaseModel):
@@ -138,23 +114,6 @@ def build_router(pub: Publisher) -> APIRouter:
     @r.post("/variants")
     def variants(body: VariantsIn):
         return errors(pub.preview, body.source, body.account_ids, body.clip_ids, body.use_llm)
-
-    @r.post("/jobs", status_code=201)
-    def create_job(body: JobIn):
-        if body.scheduled_at:
-            try:
-                parse_time(body.scheduled_at)
-            except ValueError:
-                raise HTTPException(422, "scheduled_at must be ISO 8601, e.g. 2026-11-01T18:00:00+00:00")
-        targets = None
-        if body.targets is not None:
-            targets = [{"clip_id": t.clip_id, "account_id": t.account_id, "scheduled_at": t.scheduled_at,
-                        "post": {k: v for k, v in (t.post.model_dump() if t.post else {}).items() if v is not None}}
-                       for t in body.targets]
-        elif not body.account_ids:
-            raise HTTPException(422, "Give targets, or account_ids (+ optional clip_ids)")
-        return errors(pub.create_job, body.source, targets, body.account_ids, body.clip_ids, body.use_llm,
-                      body.scheduled_at)
 
     @r.get("/jobs")
     def list_jobs(source: str | None = None):

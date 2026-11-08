@@ -6,6 +6,12 @@ work/
 output/
 .env
 backend/data/
+backend/backups/
 frontend/node_modules/
 frontend/dist/
 frontend/.env.local
+
+# Music tracks may be under copyright: only the README and tags file are committed
+assets/music/*
+!assets/music/README.md
+!assets/music/tracks.json

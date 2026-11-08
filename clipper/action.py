@@ -113,6 +113,7 @@ def find_action_picks(src, cfg: dict, ffmpeg: str, duration: float) -> list[dict
             "score": round(float(score) * 10, 2),
             "score_breakdown": {"motion": round(float(m) * 10, 2), "activity": round(float(d) * 10, 2),
                                 "sound": round(float(s) * 10, 2)},
+            "music_mood": "upbeat",
             "selected_by": "action",
         })
     log.info("action picks: %d moments from %d windows (no speech)", len(picks), len(candidates))

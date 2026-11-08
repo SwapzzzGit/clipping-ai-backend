@@ -49,8 +49,7 @@ The full lifecycle runs without anyone watching: link in, clips out, posts live 
    app: see [docs/publishing.md](docs/publishing.md).
 2. **Create categories** (Finance, Motivation, Entertainment, …) and tick the accounts that post each one.
    An account can belong to several categories. Per category:
-   - **Approval**: *Fully automatic* (clips scoring at least the threshold are approved and posted as soon
-     as they render, at most N per video), or *I approve each clip* (Approve on a clip card posts it).
+   - **Approval**: a person approves each clip. Then the clip card lists your accounts: pick where it goes and publish now or schedule it.
    - **Minutes between clips** spaces out the clips of one video, plus hashtags added to every post,
      optional LLM-written per-platform captions, and content rules for choosing clips.
 3. **Submit videos** with a category: one link, the **Batch** tab (one `url, category` per line), the
@@ -109,6 +108,10 @@ py -3.12 -m venv .venv
 - **JS runtime**: YouTube now requires one for format extraction. clipper uses `deno` if it is
   installed, otherwise `node`.
 - **LLM key**: by default it uses Gemini Flash-Lite and reads `GEMINI_API_KEY`. See [LLM providers](#llm-providers).
+- **Caption styles**: the pycaps styles are installed from their GitHub release (pinned in `pyproject.toml`; the
+  "pycaps" name on PyPI is a different package). pycaps draws the captions in a headless browser, so install it once:
+  `.venv/Scripts/python -m playwright install chromium`. To refresh the style previews after a pycaps upgrade:
+  `.venv/Scripts/python scripts/make_caption_previews.py --source <any 9:16 clip>`.
 
 ## Usage
 

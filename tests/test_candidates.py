@@ -240,3 +240,21 @@ def test_snap_mark_without_word_timings_uses_segments():
 def test_words_text_covers_range():
     segs = make_segments(["a b c d.", "e f g h."])
     assert cand.words_text(segs, 0.8, 2.5) == "c d. e f"
+
+
+def test_auto_count_keeps_only_strong_clips_and_always_one():
+    auto = {"auto_clips": True, "auto_min_score": 7.0}
+    clips = [{"score": 8.0}, {"score": 6.5}, {"score": 3.0}]
+    assert [c["score"] for c in cand.keep_strong(clips, auto)] == [8.0]
+    assert [c["score"] for c in cand.keep_strong([{"score": 6.5}, {"score": 3.0}], auto)] == [6.5]
+    assert cand.keep_strong(clips, {"auto_clips": False, "auto_min_score": 7.0}) == clips
+
+
+def test_auto_mode_asks_for_up_to_the_cap(cfg, long_segments):
+    cfg["num_clips"], cfg["auto_clips"] = 3, True
+    scored = _scored_windows(long_segments, cfg)
+    regions = cand.merge_regions(scored[:4])
+    llm = FakeLLM(["garbage", "still garbage"])
+    clips = cand.select_clips(regions, long_segments, scored, llm, cfg, "")
+    assert "choose up to 3 short-form clips" in " ".join(llm.prompts[0][0].split())
+    assert 1 <= len(clips) <= 3

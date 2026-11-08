@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -15,6 +16,16 @@ from clipper.render import HEAD_ROOM, TAIL_ROOM
 from clipper.util import has_audio, hms, js_runtime, log
 
 RAW_NAME = re.compile(r"clip_(\d+)_(\d+)_(\d+)\.mp4")
+BOT_CHECK_MARKERS = ("not a bot", "sign in to confirm")
+BOT_BLOCK_HELP = ("YouTube blocked this download with its 'not a bot' check, so the video could not be fetched. "
+                  "Trying again right away only repeats the request. Upload the video file with 'Upload from this PC' "
+                  "instead, or try this video again later.")
+
+
+def is_bot_block(message: str) -> bool:
+    """YouTube's bot check. Retrying the same request while it applies only makes the block last longer."""
+    text = (message or "").lower()
+    return any(marker in text for marker in BOT_CHECK_MARKERS)
 
 
 def is_valid_video(path: Path, ffmpeg: str, min_sec: float = 1.0) -> bool:
@@ -45,7 +56,8 @@ def find_covering_raw(raw_dir: Path, clip: dict, ffmpeg: str) -> dict | None:
     return None
 
 
-def download_clip(url: str, clip: dict, raw_dir: Path, cfg: dict, ffmpeg: str, duration: float) -> dict:
+def download_clip(url: str, clip: dict, raw_dir: Path, cfg: dict, ffmpeg: str, duration: float,
+                  blocked: threading.Event | None = None) -> dict:
     """Download [start-pad, end+pad] of one clip. Returns {path, offset_sec, ...}."""
     d = cfg["download"]
     start = max(0.0, clip["start_sec"] - d["padding_sec"])
@@ -61,6 +73,8 @@ def download_clip(url: str, clip: dict, raw_dir: Path, cfg: dict, ffmpeg: str, d
         log.info("clip %d: reusing raw download %s", clip["id"], Path(covering["path"]).name)
         return covering
 
+    if blocked is not None and blocked.is_set():  # another clip of this job already hit the bot check
+        return {**result, "error": BOT_BLOCK_HELP, "blocked": True}
     h = d["max_height"]
     # Subprocess rather than the yt_dlp API: the API does not pass ffmpeg_location on to
     # the section downloader, so --download-sections fails unless ffmpeg is on PATH.
@@ -84,6 +98,10 @@ def download_clip(url: str, clip: dict, raw_dir: Path, cfg: dict, ffmpeg: str, d
             return result
         last_error = (proc.stderr or proc.stdout).strip()[-500:] or "downloaded file is missing, unreadable or has no audio"
         log.warning("clip %d: download failed: %s", clip["id"], last_error)
+        if is_bot_block(last_error):
+            if blocked is not None:
+                blocked.set()  # the other clips of this job are not requested from YouTube again
+            return {**result, "error": BOT_BLOCK_HELP, "blocked": True}
         time.sleep(2 * (attempt + 1))
     return {**result, "error": last_error}
 
@@ -101,5 +119,7 @@ def download_clips(url: str, clips: list[dict], work: Path, cfg: dict, ffmpeg: s
                        for c in clips}
             return {cid: f.result() for cid, f in futures.items()}
     with ThreadPoolExecutor(max_workers=max(1, cfg["download"]["parallel"])) as pool:
-        futures = {c["id"]: pool.submit(download_clip, url, c, raw_dir, cfg, ffmpeg, duration) for c in clips}
+        blocked = threading.Event()
+        futures = {c["id"]: pool.submit(download_clip, url, c, raw_dir, cfg, ffmpeg, duration, blocked)
+                   for c in clips}
         return {cid: f.result() for cid, f in futures.items()}

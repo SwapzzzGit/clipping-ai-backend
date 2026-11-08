@@ -17,6 +17,7 @@ WORK_DIR = DATA_DIR / "work"
 OUTPUT_DIR = DATA_DIR / "output"
 TASKS_DIR = DATA_DIR / "claude_tasks"
 UPLOADS_DIR = DATA_DIR / "uploads"
+BRAND_DIR = DATA_DIR / "branding"
 SETTINGS_PATH = DATA_DIR / "settings.json"
 
 STAGES = ["transcript", "selection", "download", "render", "done"]
